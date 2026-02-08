@@ -1,6 +1,12 @@
-# lightwire-lifx
+# lightwire
 
-> Control LiFX lights over
+> Control smart-bulb brightness as virtual PipeWire node's volume
+
+# Crates
+
+## lightwire-lifx
+
+Provider for local LiFx bulbs
 
 # Note
 
