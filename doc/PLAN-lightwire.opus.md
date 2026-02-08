@@ -115,48 +115,71 @@ Trade-off: We must implement UDP I/O ourselves, but this gives full control over
 
 ---
 
-## CLI Design
+## CLI Tools
+
+Three focused CLI tools, each with a single responsibility:
+
+### 1. `lightwire-populate` — Discover lights, create PipeWire configs
 
 ```
-lightwire <command>
+lightwire-populate [OPTIONS]
 
-Commands:
-  scan        Discover lights on the network
-  sync        Create/update PipeWire configs for discovered lights
-  remove      Remove a light's PipeWire config
-  list        List managed lights and their node status
-  daemon      Run the volume→brightness bridge daemon
-  reload      Trigger PipeWire to reload configuration
+Discovers lights on the network and creates PipeWire drop-in configs.
 
 Options:
-  --provider <name>   Light provider (default: lifx)
-  --config-dir <path> PipeWire config directory
-                      (default: ~/.config/pipewire/pipewire.conf.d)
+  --provider <name>     Light provider (default: lifx)
+  --config-dir <path>   PipeWire config directory
+  --dry-run             Show what would be created without writing
+  --clean               Remove configs for lights no longer found
+```
+
+### 2. `lightwire-sync-to-pipewire` — Light state → PipeWire volume
+
+```
+lightwire-sync-to-pipewire [OPTIONS]
+
+Reads current brightness from lights and sets corresponding PipeWire node volumes.
+
+Options:
+  --provider <name>     Light provider (default: lifx)
+  --once                Sync once and exit (default: watch for light changes)
+  --interval <ms>       Polling interval for light state (default: 1000)
+```
+
+### 3. `lightwire-sync-to-light` — PipeWire volume → Light brightness
+
+```
+lightwire-sync-to-light [OPTIONS]
+
+Watches PipeWire node volumes and updates light brightness accordingly.
+
+Options:
+  --provider <name>     Light provider (default: lifx)
+  --once                Sync once and exit (default: watch for volume changes)
 ```
 
 ### Example Workflow
 
 ```bash
-# Discover bulbs
-$ lightwire scan
+# Discover and create configs
+$ lightwire-populate --provider lifx
 Found 3 LIFX bulbs:
   - Bedroom (d073d5xxxxxx)
   - Living Room (d073d5yyyyyy)
   - Desk Lamp (d073d5zzzzzz)
-
-# Generate PipeWire configs
-$ lightwire sync
 Created: ~/.config/pipewire/pipewire.conf.d/lightwire-lifx-bedroom.conf
 Created: ~/.config/pipewire/pipewire.conf.d/lightwire-lifx-living-room.conf
 Created: ~/.config/pipewire/pipewire.conf.d/lightwire-lifx-desk-lamp.conf
 
-# Reload PipeWire
-$ lightwire reload
-Reloading PipeWire...
+# Restart PipeWire to load new nodes
+$ systemctl --user restart pipewire
 
-# Run daemon (or as systemd service)
-$ lightwire daemon
-Monitoring nodes: lightwire.lifx.bedroom, lightwire.lifx.living-room, lightwire.lifx.desk-lamp
+# Initialize PipeWire volumes from current light brightness
+$ lightwire-sync-to-pipewire --provider lifx --once
+
+# Run the daemon to push volume changes to lights
+$ lightwire-sync-to-light --provider lifx
+Watching: lightwire.lifx.bedroom, lightwire.lifx.living-room, lightwire.lifx.desk-lamp
 ```
 
 ---
@@ -197,35 +220,242 @@ Monitoring nodes: lightwire.lifx.bedroom, lightwire.lifx.living-room, lightwire.
 lightwire/
 ├── Cargo.toml
 ├── src/
-│   ├── main.rs           # CLI entry (clap)
-│   ├── lib.rs            # Public API
-│   ├── cli/
-│   │   ├── mod.rs
-│   │   ├── scan.rs       # Discovery command
-│   │   ├── sync.rs       # Config generation
-│   │   ├── daemon.rs     # Bridge daemon
-│   │   └── reload.rs     # PipeWire reload
-│   ├── config/
-│   │   ├── mod.rs
-│   │   ├── dropin.rs     # Drop-in file generation/parsing
-│   │   └── settings.rs   # User config (figment)
+│   ├── lib.rs                    # Core library
+│   ├── bin/
+│   │   ├── lightwire-populate.rs
+│   │   ├── lightwire-sync-to-pipewire.rs
+│   │   └── lightwire-sync-to-light.rs
+│   ├── provider/
+│   │   ├── mod.rs                # Provider trait + LightState
+│   │   └── lifx.rs               # LIFX implementation
 │   ├── pipewire/
 │   │   ├── mod.rs
-│   │   ├── monitor.rs    # Node enumeration and binding
-│   │   └── volume.rs     # Props parsing, volume extraction
-│   ├── providers/
-│   │   ├── mod.rs        # Provider trait
-│   │   └── lifx/
-│   │       ├── mod.rs
-│   │       ├── discovery.rs
-│   │       ├── bulb.rs
-│   │       └── protocol.rs
-│   └── bridge.rs         # Volume → Brightness mapping
-└── lightwire-lifx/       # Standalone LIFX crate (optional)
+│   │   ├── dropin.rs             # Config file generation
+│   │   ├── volume.rs             # Volume get/set via pw-cli or native
+│   │   └── monitor.rs            # Watch for volume changes
+│   └── types.rs                  # LightId, Brightness, etc.
+└── lightwire-lifx/               # Optional standalone crate
     ├── Cargo.toml
-    └── src/
-        └── lib.rs
+    └── src/lib.rs
 ```
+
+---
+
+## Provider Interface Design
+
+The provider abstraction is critical for supporting multiple light ecosystems (LIFX, Hue, WLED, etc.). Here are three proposals:
+
+### Proposal A: Trait with Associated Types (Recommended)
+
+Each provider defines its own `Light` type with provider-specific details. The trait uses associated types for zero-cost abstraction.
+
+```rust
+/// Unique identifier for a light within a provider
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LightId(pub String);
+
+/// Normalized brightness value
+#[derive(Clone, Copy, Debug)]
+pub struct Brightness(f32);  // 0.0..=1.0
+
+impl Brightness {
+    pub fn new(value: f32) -> Self {
+        Self(value.clamp(0.0, 1.0))
+    }
+    pub fn as_f32(&self) -> f32 { self.0 }
+    pub fn as_u16(&self) -> u16 { (self.0 * 65535.0) as u16 }
+}
+
+/// Current state of a light
+#[derive(Clone, Debug)]
+pub struct LightState {
+    pub id: LightId,
+    pub label: String,
+    pub brightness: Brightness,
+    pub power: bool,
+    // Provider can store extra data in `extra`
+}
+
+/// Provider trait with associated Light type
+pub trait Provider {
+    /// Provider-specific light representation
+    type Light: Light;
+    
+    /// Provider name for config file prefixes
+    fn name(&self) -> &'static str;
+    
+    /// Discover all lights on the network
+    async fn discover(&self) -> Result<Vec<Self::Light>, ProviderError>;
+    
+    /// Get current state of a specific light
+    async fn get_state(&self, id: &LightId) -> Result<LightState, ProviderError>;
+    
+    /// Set brightness (and optionally power) for a light
+    async fn set_brightness(&self, id: &LightId, brightness: Brightness) -> Result<(), ProviderError>;
+}
+
+/// Common light interface
+pub trait Light {
+    fn id(&self) -> &LightId;
+    fn label(&self) -> &str;
+    fn state(&self) -> &LightState;
+}
+```
+
+**LIFX Implementation:**
+
+```rust
+pub struct LifxProvider {
+    socket: UdpSocket,
+    timeout: Duration,
+}
+
+pub struct LifxLight {
+    pub id: LightId,
+    pub label: String,
+    pub addr: SocketAddr,
+    pub state: LightState,
+    // LIFX-specific: color, kelvin, etc.
+    pub hue: u16,
+    pub saturation: u16,
+    pub kelvin: u16,
+}
+
+impl Provider for LifxProvider {
+    type Light = LifxLight;
+    fn name(&self) -> &'static str { "lifx" }
+    // ...
+}
+```
+
+**Pros:** Type-safe, zero-cost, provider can have rich Light types  
+**Cons:** Cannot easily store `Vec<Box<dyn Provider>>` for multi-provider support
+
+---
+
+### Proposal B: Trait Objects with Dynamic Dispatch
+
+Use trait objects for runtime polymorphism, enabling multi-provider support in a single daemon.
+
+```rust
+/// Light as a trait object
+pub trait Light: Send + Sync {
+    fn id(&self) -> &LightId;
+    fn label(&self) -> &str;
+    fn provider_name(&self) -> &str;
+}
+
+/// Provider as a trait object
+#[async_trait]
+pub trait Provider: Send + Sync {
+    fn name(&self) -> &'static str;
+    
+    async fn discover(&self) -> Result<Vec<Box<dyn Light>>, ProviderError>;
+    async fn get_state(&self, id: &LightId) -> Result<LightState, ProviderError>;
+    async fn set_brightness(&self, id: &LightId, brightness: Brightness) -> Result<(), ProviderError>;
+}
+
+/// Registry of providers
+pub struct ProviderRegistry {
+    providers: HashMap<String, Box<dyn Provider>>,
+}
+
+impl ProviderRegistry {
+    pub fn register(&mut self, provider: Box<dyn Provider>) {
+        self.providers.insert(provider.name().to_string(), provider);
+    }
+    
+    pub async fn discover_all(&self) -> Result<Vec<Box<dyn Light>>, ProviderError> {
+        let mut lights = Vec::new();
+        for provider in self.providers.values() {
+            lights.extend(provider.discover().await?);
+        }
+        Ok(lights)
+    }
+}
+```
+
+**Pros:** Easy multi-provider support, runtime flexibility  
+**Cons:** Heap allocation, `async_trait` macro overhead, loses provider-specific Light fields
+
+---
+
+### Proposal C: Enum-Based (Closed Set of Providers)
+
+If the set of providers is known at compile time, use enums for exhaustive matching.
+
+```rust
+#[derive(Clone, Debug)]
+pub enum LightKind {
+    Lifx(LifxLight),
+    Hue(HueLight),
+    Wled(WledLight),
+}
+
+impl LightKind {
+    pub fn id(&self) -> &LightId {
+        match self {
+            Self::Lifx(l) => &l.id,
+            Self::Hue(l) => &l.id,
+            Self::Wled(l) => &l.id,
+        }
+    }
+    
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Lifx(l) => &l.label,
+            Self::Hue(l) => &l.label,
+            Self::Wled(l) => &l.label,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum ProviderKind {
+    Lifx(LifxProvider),
+    Hue(HueProvider),
+    Wled(WledProvider),
+}
+
+impl ProviderKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Lifx(_) => "lifx",
+            Self::Hue(_) => "hue",
+            Self::Wled(_) => "wled",
+        }
+    }
+    
+    pub async fn discover(&self) -> Result<Vec<LightKind>, ProviderError> {
+        match self {
+            Self::Lifx(p) => p.discover().await.map(|v| v.into_iter().map(LightKind::Lifx).collect()),
+            Self::Hue(p) => p.discover().await.map(|v| v.into_iter().map(LightKind::Hue).collect()),
+            Self::Wled(p) => p.discover().await.map(|v| v.into_iter().map(LightKind::Wled).collect()),
+        }
+    }
+}
+```
+
+**Pros:** No heap allocation, exhaustive matching, access to provider-specific fields  
+**Cons:** Adding a provider requires modifying enums, not extensible by users
+
+---
+
+### Recommendation
+
+**Start with Proposal A (Associated Types)** for the initial LIFX-only implementation:
+- Clean separation, type-safe, zero overhead
+- Easily testable with mock providers
+
+**Migrate to Proposal B (Trait Objects)** when adding a second provider:
+- Wrap each provider in `Box<dyn Provider>`
+- Accept the minor overhead for runtime flexibility
+
+The key types that remain stable across proposals:
+- `LightId` — unique identifier
+- `Brightness` — normalized 0.0–1.0
+- `LightState` — common state snapshot
+- `ProviderError` — unified error type
 
 ---
 
@@ -361,27 +591,31 @@ fn reload_pipewire() -> io::Result<()> {
 
 ## Implementation Phases
 
-### Phase 1: LIFX Discovery & Control
-- Implement discovery using lifx-core
-- Implement brightness control
-- CLI: `lightwire scan`, basic brightness test
+### Phase 1: Core Types & LIFX Provider
+- Define `LightId`, `Brightness`, `LightState`, `ProviderError`
+- Implement `Provider` trait (Proposal A)
+- Implement `LifxProvider` with discovery and brightness control
+- Unit tests with mock UDP
 
-### Phase 2: Config Generation
-- Drop-in file generation/removal
-- CLI: `lightwire sync`, `lightwire remove`, `lightwire list`
-- PipeWire reload helper
+### Phase 2: PipeWire Drop-in Generation
+- Implement `pipewire::dropin` module
+- `lightwire-populate` CLI tool
+- Integration test: generate config, verify syntax
 
-### Phase 3: PipeWire Monitoring
-- Connect to PipeWire via pipewire-native
-- Enumerate nodes, bind to managed ones
-- Subscribe to Props changes
-- CLI: `lightwire daemon`
+### Phase 3: PipeWire Volume Interface
+- Implement `pipewire::volume` (get/set via `pw-cli` or `wpctl`)
+- Implement `pipewire::monitor` (watch for changes via pipewire-native)
+- `lightwire-sync-to-pipewire` CLI tool
 
-### Phase 4: Bridge & Polish
-- Volume→brightness mapping with per-light config
-- Systemd service file for daemon
-- Error recovery (reconnect on PipeWire restart)
+### Phase 4: Light Sync Daemon
+- `lightwire-sync-to-light` CLI tool
+- Watch PipeWire volume → update light brightness
+- Error recovery, reconnection logic
+
+### Phase 5: Polish
+- Systemd service files
 - Documentation
+- Optional: second provider (Hue/WLED) to validate Proposal B migration
 
 ---
 
