@@ -46,6 +46,33 @@ async fn main() -> Result<()> {
         .map(|p| std::path::PathBuf::from(shellexpand::tilde(&p).into_owned()))
         .unwrap_or_else(|| config.pipewire_config_dir());
 
+    if cli.clean {
+        if cli.dry_run {
+            println!("DRY RUN: Would clean existing lightwire configs...");
+        } else {
+            println!("Cleaning existing lightwire configs...");
+        }
+        let entries = std::fs::read_dir(&config_dir_path);
+        if let Ok(entries) = entries {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("conf") {
+                    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if filename.starts_with("lightwire-") {
+                        if cli.dry_run {
+                            println!("Would remove: {}", filename);
+                        } else {
+                            match std::fs::remove_file(&path) {
+                                Ok(_) => println!("Removed: {}", filename),
+                                Err(e) => tracing::warn!("Failed to remove {}: {}", filename, e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if cli.dry_run {
         println!("DRY RUN: Would write to: {}", config_dir_path.display());
     }
