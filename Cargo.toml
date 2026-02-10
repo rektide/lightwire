@@ -1,0 +1,41 @@
+[package]
+name = "lightwire"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pipewire-native = "0.1"
+lifx-core = "0.4"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "fs", "macros", "sync"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+jiff = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+shellexpand = "3"
+anyhow = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "lightwire"
+path = "src/bin/lightwire.rs"
+
+[[bin]]
+name = "lightwire-populate"
+path = "src/bin/lightwire-populate.rs"
+
+[[bin]]
+name = "lightwire-sync-to-pipewire"
+path = "src/bin/lightwire-sync-to-pipewire.rs"
+
+[[bin]]
+name = "lightwire-sync-to-light"
+path = "src/bin/lightwire-sync-to-light.rs"
