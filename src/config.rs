@@ -18,6 +18,17 @@ pub struct Config {
     pub lights: LightsConfig,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            pipewire: PipewireConfig::default(),
+            curves: CurvesConfig::default(),
+            lifx: LifxConfig::default(),
+            lights: LightsConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PipewireConfig {
     #[serde(default = "default_config_dir")]
