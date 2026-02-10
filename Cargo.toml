@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 pipewire-native = "0.1"
 lifx-core = "0.4"
-tokio = { version = "1", features = ["net", "rt-multi-thread", "fs", "macros", "sync"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "fs", "macros", "sync", "time"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
